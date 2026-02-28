@@ -5,6 +5,7 @@ import Container from './../components/ui/Container'
 import Button from './../components/ui/Button'
 import Badge from './../components/ui/Badge'
 import { Card, CardContent, CardHeader } from './../components/ui/Card'
+import { deleteItem, unmarkSale } from './actions'
 
 type ItemStatus = 'EM_STOCK' | 'VENDIDO'
 type StatusFilter = ItemStatus | 'ALL'
@@ -47,10 +48,18 @@ function formatEUR(v: any) {
   return `€ ${n.toFixed(2)}`
 }
 
+// Ajuda a evitar problemas com caracteres especiais em ilike
+function sanitizeForILike(input: string) {
+  // remove espaços duplicados e trim
+  const s = input.replace(/\s+/g, ' ').trim()
+  // opcional: limitar tamanho
+  return s.slice(0, 80)
+}
+
 export default async function ItemsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ status?: string; category?: string; sort?: string }>
+  searchParams: Promise<{ status?: string; category?: string; sort?: string; q?: string }>
 }) {
   const supabase = await createClient()
 
@@ -67,6 +76,9 @@ export default async function ItemsPage({
 
   const categoryId = sp.category ? Number(sp.category) : null
   const { key: sortKey, dir: sortDir, option: sortOption } = parseSort(sp.sort)
+
+  const qRaw = typeof sp.q === 'string' ? sp.q : ''
+  const q = sanitizeForILike(qRaw)
 
   // Dropdowns (para filtros + labels)
   const [{ data: categories, error: catError }, { data: platforms, error: platError }] =
@@ -103,6 +115,13 @@ export default async function ItemsPage({
   if (status !== 'ALL') query = query.eq('status', status)
   if (categoryId) query = query.eq('category_id', categoryId)
 
+  // ✅ Pesquisa por título ou notas
+  // Nota: se a tua view não tiver "notes", diz-me e trocamos para só "title"
+  if (q.length > 0) {
+    const pattern = `%${q}%`
+    query = query.or(`title.ilike.${pattern},notes.ilike.${pattern}`)
+  }
+
   const { data: items, error: itemsError } = await query
 
   if (itemsError) {
@@ -136,7 +155,8 @@ export default async function ItemsPage({
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Inventário</h1>
           <p className="mt-1 text-sm text-zinc-600">
-            Capital preso (EM_STOCK): <span className="font-semibold text-zinc-900">{formatEUR(capitalPreso)}</span>
+            Capital preso (EM_STOCK):{' '}
+            <span className="font-semibold text-zinc-900">{formatEUR(capitalPreso)}</span>
           </p>
         </div>
 
@@ -151,12 +171,23 @@ export default async function ItemsPage({
           <CardHeader>
             <div className="flex flex-col gap-1">
               <div className="text-sm font-semibold">Filtros</div>
-              <div className="text-xs text-zinc-500">Refina por status, categoria e ordenação</div>
+              <div className="text-xs text-zinc-500">Refina por pesquisa, status, categoria e ordenação</div>
             </div>
           </CardHeader>
 
           <CardContent>
             <form method="get" action="/items" className="flex flex-wrap gap-3">
+              {/* ✅ Pesquisa */}
+              <div className="grid gap-1.5">
+                <label className="text-xs font-medium text-zinc-600">Pesquisar</label>
+                <input
+                  name="q"
+                  defaultValue={qRaw}
+                  placeholder="ex: jordan, ram, bilhete..."
+                  className="h-10 min-w-[260px] rounded-xl border border-zinc-200 bg-white px-3 text-sm outline-none focus:ring-2 focus:ring-zinc-200"
+                />
+              </div>
+
               <div className="grid gap-1.5">
                 <label className="text-xs font-medium text-zinc-600">Status</label>
                 <select
@@ -227,6 +258,12 @@ export default async function ItemsPage({
                 <div className="text-sm font-semibold">Itens</div>
                 <div className="text-xs text-zinc-500">
                   {items?.length ?? 0} item(s) encontrados
+                  {q.trim().length > 0 ? (
+                    <>
+                      {' '}
+                      • a pesquisar por <span className="font-medium text-zinc-700">“{q.trim()}”</span>
+                    </>
+                  ) : null}
                 </div>
               </div>
             </div>
@@ -258,8 +295,7 @@ export default async function ItemsPage({
                           ? platformMap.get(item.platform_id) ?? '-'
                           : '-'
 
-                      const badgeTone =
-                        item.status === 'EM_STOCK' ? 'green' : 'neutral'
+                      const badgeTone = item.status === 'EM_STOCK' ? 'green' : 'neutral'
 
                       return (
                         <tr
@@ -283,17 +319,54 @@ export default async function ItemsPage({
                             {item.hold_days} dias
                           </td>
                           <td className="py-3 text-right">
-                            {item.status === 'EM_STOCK' ? (
-                              <Link
-                                href={`/items/${item.id}/sell`}
-                                className="rounded-xl px-3 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-100"
-                              >
-                                Marcar vendido
-                              </Link>
-                            ) : (
-                              <span className="text-zinc-400">—</span>
-                            )}
-                          </td>
+                          <div className="relative inline-block text-left">
+                            <details className="group">
+                              <summary className="cursor-pointer rounded-xl px-3 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-100 list-none">
+                                ⋯
+                              </summary>
+
+                              <div className="absolute right-0 z-10 mt-2 w-48 overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-lg">
+                                <Link
+                                  href={`/items/${item.id}/edit`}
+                                  className="block px-4 py-2 text-sm hover:bg-zinc-50"
+                                >
+                                  Editar
+                                </Link>
+
+                                {item.status === 'EM_STOCK' && (
+                                  <Link
+                                    href={`/items/${item.id}/sell`}
+                                    className="block px-4 py-2 text-sm hover:bg-zinc-50"
+                                  >
+                                    Marcar vendido
+                                  </Link>
+                                )}
+
+                                {item.status === 'VENDIDO' && (
+                                  <form action={unmarkSale.bind(null, item.id)}>
+                                    <button
+                                      type="submit"
+                                      className="block w-full px-4 py-2 text-left text-sm hover:bg-zinc-50"
+                                    >
+                                      Desmarcar venda
+                                    </button>
+                                  </form>
+                                )}
+
+                                <div className="h-px bg-zinc-100" />
+
+                                <form action={deleteItem.bind(null, item.id)}>
+                                  <button
+                                    type="submit"
+                                    className="block w-full px-4 py-2 text-left text-sm text-rose-700 hover:bg-rose-50"
+                                  >
+                                    Apagar
+                                  </button>
+                                </form>
+                              </div>
+                            </details>
+                          </div>
+                        </td>
                         </tr>
                       )
                     })

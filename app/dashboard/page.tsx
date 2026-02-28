@@ -38,6 +38,14 @@ function formatEUR(v: any) {
   return `€ ${n.toFixed(2)}`
 }
 
+function formatPct(v: any) {
+  const n = Number(v ?? 0)
+  if (!Number.isFinite(n)) return '—'
+  return `${(n * 100).toFixed(1)}%`
+}
+
+const HOLD_ALERT_DAYS = 30
+
 export default async function DashboardPage({
   searchParams,
 }: {
@@ -69,11 +77,11 @@ export default async function DashboardPage({
     .lt('purchase_date', to)
     .order('purchase_date', { ascending: false })
 
-  // ✅ Vendidos do mês (por sale_date) via view enriched
+  // ✅ Vendidos do mês (por sale_date) via view enriched (agora com category_name, roi, profit_margin)
   const { data: soldThisMonth, error: soldError } = await supabase
     .from('v_items_enriched')
     .select(
-      'id,title,purchase_price,purchase_date,sale_price,sale_date,profit,hold_days,status,platform_id'
+      'id,title,purchase_price,purchase_date,sale_price,sale_date,profit,hold_days,status,platform_id,category_name,platform_name,roi,profit_margin'
     )
     .eq('status', 'VENDIDO')
     .gte('sale_date', from)
@@ -94,12 +102,22 @@ export default async function DashboardPage({
     .gte('sale_date', from)
     .lt('sale_date', to)
 
-  if (purchasesError || soldError || stockError || platformError) {
+  // ✅ Hold alerts (em stock há +X dias)
+  const { data: holdAlerts, error: holdAlertsError } = await supabase
+    .from('v_items_enriched')
+    .select('id,title,purchase_date,hold_days,purchase_price,category_name')
+    .eq('status', 'EM_STOCK')
+    .gte('hold_days', HOLD_ALERT_DAYS)
+    .order('hold_days', { ascending: false })
+    .limit(10)
+
+  if (purchasesError || soldError || stockError || platformError || holdAlertsError) {
     const msg =
       purchasesError?.message ||
       soldError?.message ||
       stockError?.message ||
-      platformError?.message
+      platformError?.message ||
+      holdAlertsError?.message
 
     return (
       <Container>
@@ -112,19 +130,36 @@ export default async function DashboardPage({
     purchases?.reduce((acc, p) => acc + Number(p.purchase_price ?? 0), 0) ?? 0
 
   const totalVendasMes =
-    soldThisMonth?.reduce((acc, s) => acc + Number(s.sale_price ?? 0), 0) ?? 0
+    soldThisMonth?.reduce((acc, s: any) => acc + Number(s.sale_price ?? 0), 0) ?? 0
 
   const lucroMes =
-    soldThisMonth?.reduce((acc, s) => acc + Number(s.profit ?? 0), 0) ?? 0
+    soldThisMonth?.reduce((acc, s: any) => acc + Number(s.profit ?? 0), 0) ?? 0
 
   const capitalPreso =
     inStock?.reduce((acc, i) => acc + Number(i.purchase_price ?? 0), 0) ?? 0
 
   const holdMedio =
     soldThisMonth && soldThisMonth.length > 0
-      ? soldThisMonth.reduce((acc, s) => acc + Number(s.hold_days ?? 0), 0) /
+      ? soldThisMonth.reduce((acc: number, s: any) => acc + Number(s.hold_days ?? 0), 0) /
         soldThisMonth.length
       : null
+
+  // ✅ Sell-through rate (vendidos/comprados) no mês
+  const boughtCount = purchases?.length ?? 0
+  const soldCount = soldThisMonth?.length ?? 0
+  const sellThroughRate = boughtCount > 0 ? soldCount / boughtCount : 0
+
+  // ✅ Lucro por categoria (Top)
+  const profitByCategoryMap = new Map<string, number>()
+  for (const s of soldThisMonth ?? []) {
+    const cat = (s as any).category_name ?? 'Sem categoria'
+    const p = Number((s as any).profit ?? 0)
+    profitByCategoryMap.set(cat, (profitByCategoryMap.get(cat) ?? 0) + (Number.isFinite(p) ? p : 0))
+  }
+  const profitByCategory = Array.from(profitByCategoryMap.entries())
+    .map(([name, profit]) => ({ name, profit }))
+    .sort((a, b) => b.profit - a.profit)
+    .slice(0, 8)
 
   // Agrupar vendas por plataforma
   const platformCountsMap = new Map<string, number>()
@@ -153,7 +188,8 @@ export default async function DashboardPage({
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Dashboard</h1>
           <p className="mt-1 text-sm text-zinc-600">
-            Mês selecionado: <span className="font-semibold text-zinc-900">{monthLabel(selectedMonth)}</span>{' '}
+            Mês selecionado:{' '}
+            <span className="font-semibold text-zinc-900">{monthLabel(selectedMonth)}</span>{' '}
             <span className="text-zinc-500">({from} → {to})</span>
           </p>
         </div>
@@ -168,7 +204,7 @@ export default async function DashboardPage({
       </div>
 
       {/* KPI cards */}
-      <div className="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
+      <div className="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-6">
         <Kpi title="Compras do mês" value={formatEUR(totalComprasMes)} />
         <Kpi title="Vendas do mês" value={formatEUR(totalVendasMes)} />
         <Kpi title="Lucro do mês" value={formatEUR(lucroMes)} />
@@ -177,6 +213,71 @@ export default async function DashboardPage({
           title="Hold médio (vendidos no mês)"
           value={holdMedio == null ? '—' : `${holdMedio.toFixed(1)} dias`}
         />
+        <Kpi title="Sell-through rate" value={formatPct(sellThroughRate)} />
+      </div>
+
+      {/* Métricas extra */}
+      <div className="mt-5 grid grid-cols-1 gap-4 lg:grid-cols-2">
+        {/* Lucro por categoria */}
+        <Card>
+          <CardHeader>
+            <div>
+              <div className="text-sm font-semibold">Lucro por categoria</div>
+              <div className="text-xs text-zinc-500">Top categorias por lucro (vendidos no mês)</div>
+            </div>
+          </CardHeader>
+          <CardContent>
+            {profitByCategory.length === 0 ? (
+              <p className="text-sm text-zinc-500">Sem vendas neste mês.</p>
+            ) : (
+              <ProfitBarChart data={profitByCategory} />
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Hold alerts */}
+        <Card>
+          <CardHeader>
+            <div>
+              <div className="text-sm font-semibold">Hold alerts</div>
+              <div className="text-xs text-zinc-500">
+                Itens em stock há ≥ {HOLD_ALERT_DAYS} dias
+              </div>
+            </div>
+          </CardHeader>
+          <CardContent>
+            {holdAlerts && holdAlerts.length > 0 ? (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="text-xs text-zinc-500">
+                    <tr className="border-b border-zinc-100">
+                      <th className="py-2 text-left font-medium">Produto</th>
+                      <th className="py-2 text-left font-medium">Categoria</th>
+                      <th className="py-2 text-left font-medium">Compra</th>
+                      <th className="py-2 text-right font-medium">Hold</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {holdAlerts.map((h: any) => (
+                      <tr key={h.id} className="border-b border-zinc-100 hover:bg-zinc-50/70">
+                        <td className="py-3 pr-3 font-medium">
+                          <Link href={`/items/${h.id}/edit`} className="hover:underline">
+                            {h.title}
+                          </Link>
+                        </td>
+                        <td className="py-3 pr-3 text-zinc-700">{h.category_name ?? '-'}</td>
+                        <td className="py-3 pr-3 text-zinc-700">{h.purchase_date}</td>
+                        <td className="py-3 pr-3 text-right tabular-nums">{h.hold_days} dias</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <p className="text-sm text-zinc-500">Sem itens acima do threshold.</p>
+            )}
+          </CardContent>
+        </Card>
       </div>
 
       {/* Lists */}
@@ -238,17 +339,21 @@ export default async function DashboardPage({
                       <th className="py-2 text-left font-medium">Produto</th>
                       <th className="py-2 text-left font-medium">Venda</th>
                       <th className="py-2 text-right font-medium">Lucro</th>
+                      <th className="py-2 text-right font-medium">ROI</th>
                       <th className="py-2 text-right font-medium">Hold</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {soldThisMonth.map((s) => (
+                    {soldThisMonth.map((s: any) => (
                       <tr key={s.id} className="border-b border-zinc-100 hover:bg-zinc-50/70">
                         <td className="py-3 pr-3 font-medium">{s.title}</td>
                         <td className="py-3 pr-3 text-zinc-700">
                           {formatEUR(s.sale_price)} <span className="text-zinc-500">({s.sale_date})</span>
                         </td>
                         <td className="py-3 pr-3 text-right tabular-nums">{formatEUR(s.profit)}</td>
+                        <td className="py-3 pr-3 text-right tabular-nums">
+                          {s.roi == null ? '—' : formatPct(s.roi)}
+                        </td>
                         <td className="py-3 pr-3 text-right tabular-nums">{s.hold_days} dias</td>
                       </tr>
                     ))}
@@ -335,6 +440,32 @@ function BarChart({ data }: { data: { name: string; count: number }[] }) {
             <div className="flex items-center justify-between gap-3 text-sm">
               <span className="font-medium">{d.name}</span>
               <span className="tabular-nums text-zinc-600">{d.count}</span>
+            </div>
+            <div className="h-2 w-full rounded-full bg-zinc-100">
+              <div
+                className="h-2 rounded-full bg-zinc-900"
+                style={{ width: `${widthPct}%` }}
+              />
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+function ProfitBarChart({ data }: { data: { name: string; profit: number }[] }) {
+  const max = Math.max(...data.map((d) => d.profit), 1)
+
+  return (
+    <div className="grid gap-3">
+      {data.map((d) => {
+        const widthPct = (d.profit / max) * 100
+        return (
+          <div key={d.name} className="grid gap-2">
+            <div className="flex items-center justify-between gap-3 text-sm">
+              <span className="font-medium">{d.name}</span>
+              <span className="tabular-nums text-zinc-600">{formatEUR(d.profit)}</span>
             </div>
             <div className="h-2 w-full rounded-full bg-zinc-100">
               <div
