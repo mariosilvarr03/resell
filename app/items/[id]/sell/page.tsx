@@ -17,6 +17,12 @@ export default async function SellPage({
 
   const supabase = await createClient()
 
+  const {
+    data: { user },
+  } = await supabase.auth.getUser()
+
+  if (!user) return null
+
   const { data: item, error: itemError } = await supabase
     .from('items')
     .select('*')
@@ -54,6 +60,18 @@ export default async function SellPage({
     )
   }
 
+  // ✅ proteger: não faz sentido vender algo já vendido
+  if (item.status === 'VENDIDO') {
+    return (
+      <Container>
+        <div className="text-zinc-700">Este item já está marcado como vendido.</div>
+        <div className="mt-3">
+          <Button href="/items" variant="ghost">Voltar ao inventário</Button>
+        </div>
+      </Container>
+    )
+  }
+
   return (
     <Container>
       <div className="flex items-end justify-between gap-3">
@@ -61,8 +79,10 @@ export default async function SellPage({
           <h1 className="text-2xl font-semibold tracking-tight">Marcar como vendido</h1>
           <p className="mt-1 text-sm text-zinc-600">
             <span className="font-semibold text-zinc-900">{item.title}</span> — compra{' '}
-            <span className="font-semibold text-zinc-900">€ {Number(item.purchase_price).toFixed(2)}</span> em{' '}
-            {item.purchase_date}
+            <span className="font-semibold text-zinc-900">
+              € {Number(item.purchase_price).toFixed(2)}
+            </span>{' '}
+            em {item.purchase_date}
           </p>
         </div>
 
@@ -78,7 +98,11 @@ export default async function SellPage({
             <div className="text-xs text-zinc-500">Preço, data e plataforma.</div>
           </CardHeader>
           <CardContent>
-            <SellForm itemId={itemId} platforms={platforms ?? []} />
+            <SellForm
+              itemId={itemId}
+              purchaseDate={String(item.purchase_date)}
+              platforms={platforms ?? []}
+            />
           </CardContent>
         </Card>
 
